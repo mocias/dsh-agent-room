@@ -348,6 +348,28 @@ HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\<guid>
 **跑测试那台机器上恰好装了什么**，而它恰恰是最容易静默断掉的一段（变异测试证明：
 删掉分支 2 的**接线**时，只断言 `discoverDshInstall` 的测试**全绿**）。
 
+#### ⚠️ 打包会把 `lib/` 复制进 asar —— 改了正典 ≠ 改了已发布的独立应用
+
+**独立桌面版把 `lib/` 整个打进自己的 `app.asar`。** 已发布的
+`D:\agents-group\dsh-agent-room\dist\win-unpacked\resources\app.asar` 里有一份
+**自己的** `lib/harnesses.cjs`（23198 字节），**不随本仓库更新**。
+
+实测（在真实 `Agent Room.exe` 里 `require` 它自己 asar 内那份）：
+
+```
+library   ...\resources\app.asar\lib\harnesses.cjs
+dsh  found:false  "未检测到 dsh（本机 PATH 上没有 dsh，且当前进程不是 DSH 桌面端）"
+```
+
+也就是说：**本仓库修好之后，DSH 插件（走 junction）立刻受益，但独立应用的既有用户
+仍然是旧检测**，必须**移植 + 重新打包**才生效。
+
+> **验证「修复是否真的到了用户手里」，必须查 asar 内那份，而不是本仓库那份。**
+> 用 `_research/probe-shipped-standalone.cjs`（在 `Agent Room.exe` 里跑），
+> 它会报这个 build 到底有没有 `asarHasDshHost` / `discoverDshInstall`。
+> 本会话的对照实验（`_research/standalone-probe.cjs`，可用 `AR_HARNESSES` 指向任意版本）
+> 证明：**只加载本仓库那份会让「已修好」看起来成立**，而打包产物仍是旧的。
+
 ### 旧名册目录会被收养（别把这行删了）
 
 上面那个 bug 还有个**遗留后果**：旧版看不到 profile 目录，于是名册落到
@@ -400,8 +422,24 @@ HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\<guid>
 
 ## 9. 首要下一步
 
+**改 `lib/` 后必须重启 DSH**——host 模块代码只在启动时加载一次，HMR 帮不上忙。
+`agent-room/` 以 junction 链进 `desktop` profile，所以重启后 `lib/*` 的改动就是生效的。
+
 1. **重启 DSH**，确认「设置 → 通用 → Agent 群聊可用后端」这一行出现且可交互。
 2. 在真实 GUI 里加一个 `qoder` 成员（若本机装了 Qoder）或 `dsh` 成员，验证成员真的能起会话。
-   注意本机 PATH 上**没有** `dsh`：它现在靠**分支 2**（注册表发现 `D:\DeepSeek Harness`）成立，
-   而不是靠「自己就是 DSH」——后者在插件宿主里本来也不成立。
-3. 若要继续补 harness，见 §6.2——加描述即可，然后补测试与变异项。
+   注意本机 PATH 上**没有** `dsh`：它现在靠**分支 2**（注册表发现 `D:\DeepSeek Harness`）成立。
+   重启前 host 里报的是旧分支 1（「当前进程即 DSH」）——在这台机器上结论**恰好也对**，
+   因为宿主确实就是 DSH，所以**从这一行看不出修复是否加载**。要确认加载了新代码，看
+   `/agent-room/harnesses` 里 `detail` 是否变成「找到已安装的 DSH 桌面端：…」
+   （在 DSH 宿主里仍会优先走分支 1，所以更可靠的是第 3 步）。
+3. **验证 `--patch` 真的在活的子进程上**（这正是当初 `-32603` 的根因，且从 shell 里查不出来）：
+
+   ```
+   <bundled-node> _research/verify-live-patch.cjs
+   ```
+
+   退出码 0 = 所有 ACP 子进程都带 `--patch`；退出码 2 = 当前没有 ACP 子进程
+   （先在 GUI 里开一个 `dsh` 会话）；退出码 1 = 还缺 `--patch`，host 仍是旧代码。
+4. 若要继续补 harness，见 §6.2——加描述即可，然后补测试与变异项。
+5. **独立应用要单独走一遍**：移植 `lib/` 的改动后必须**重新打包**，并用
+   `_research/probe-shipped-standalone.cjs` 确认 asar 里那份也带了修复（见 §7 的打包警告）。
