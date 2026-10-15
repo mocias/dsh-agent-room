@@ -65,7 +65,10 @@
         # freed. A single stuck turn otherwise blocks that member forever.
         # queueStallMs: 120000
         # Roster edits made in the UI are saved here and survive a restart.
-        # Defaults to $DSH_PROFILE_DIR/agent-room-rooms when omitted.
+        # Defaults to <profile dir>/agent-room-rooms when omitted. The profile
+        # directory comes from DSH itself (Cordis `profileContext`), NOT from the
+        # `DSH_PROFILE_DIR` environment variable: DSH injects that variable only
+        # into the shells and children it spawns, never into its own process.
         # roomsDir: ''
         # The built-in backend is the codex app-server, which needs no entry here.
         # Every other harness this build knows (DSH, Qoder) is also auto-detected:

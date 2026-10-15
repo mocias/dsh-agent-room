@@ -109,7 +109,9 @@ C:\Program Files\nodejs\node.exe                # v24.13.0
 
 - `DSH_RUNTIME`：DSH 的 runtime 目录
 - `DSH_HOME`：默认 `%USERPROFILE%\.dsh`
-- `PROFILE_DIR`：本机是 `$DSH_HOME\profiles\desktop`，即 `DSH_PROFILE_DIR`
+- `PROFILE_DIR`：本机是 `$DSH_HOME\profiles\desktop`。
+  **注意**：它等于 `DSH_PROFILE_DIR` 的值，但**不等于** host 里能读到的环境变量——
+  该变量只注入给子进程，host 自己没有。插件通过 Cordis 的 `profileContext` 拿它，见 §7。
 
 profile 层的现状（**不在仓库里**，属于机主个人配置）：
 
@@ -239,6 +241,41 @@ codex 拿到的是真实的 `{type:'localImage', path}` 条目。**这个不对�
 ```
 llm-deepseek: no API key for provider route "deepseek-official"
 ```
+
+补丁**怎么被找到**：`lib/harnesses.cjs` 的 `launchDsh` 推导 launch line 时，若在
+profile 目录里发现 `dsh-peer-account-route.yml`，就追加 `--patch <该文件>`。
+
+### profile 目录从哪来（曾经在这里出过大事故）
+
+**`DSH_PROFILE_DIR` 只注入给子进程，从不写进 host 自己的 `process.env`。**
+`@deepseek-ai/dsh-shell-env` 的 `collect()` 把 `DSH_PROFILE_DIR`
+（以及 `DSH_SESSION_ID`、`DSH_PROFILE`）塞进**模型可见的 shell 工具**和 DSH 派生的子进程。
+于是这个变量在 DSH 终端里存在、在从终端跑的测试里也存在，**唯独在 host 里不存在**。
+
+早期版本正是用 `process.env.DSH_PROFILE_DIR` 找 profile 目录。后果：
+
+- 从 shell 里做的「推导行 == 手写行」逐字节比对**通过**了——因为 shell 里有这个变量；
+- 真实 host 里拿不到，`--patch` 被静默丢掉，ACP peer 起得来但每轮都 `-32603`；
+- 同一个变量还决定名册目录，于是名册掉进 `process.cwd()` 下的回退目录，
+  cwd 一变名册就像「消失了」。
+
+现在按优先级取：
+
+1. **Cordis `ctx.get('profileContext').dir`** —— `profile-boot` 在
+   **加载插件之前**就 `provide` 了它，所以 `apply` 时一定可取到。这是正解。
+2. `process.env.DSH_PROFILE_DIR`（普通 `node` 运行、嵌入方的后路）。
+3. **扫自己的命令行**，兼容两种形态：
+   - `--profile <name>` → `$DSH_HOME/profiles/<name>`（ACP 子进程自己的形态）；
+   - 一个**位置参数**且恰好是 `$DSH_HOME/profiles/` 下的目录
+     （**桌面端 host 的真实形态**：`... dsh-host/lib/index.js <asar> <profileDir> <runtime>`）。
+     位置参数必须做「正好在 `profiles/` 下一层」的精确包含判断，
+     否则任何路径参数都会被误认成 profile。
+
+> **验证这条链路时，必须把 `DSH_PROFILE_DIR` 显式 unset，或在真实 Electron host 里跑。**
+> 在有这个变量的 shell 里验证等于什么都没验证——这正是当初漏掉它的原因。
+> 回归测试见 `test/harnesses.cjs`（profile 段）、`test/host-entry.cjs`（host 形态）、
+> `test/acp-room.cjs`（端到端 launch line）与 `test/room-registry.cjs`（RoomApi 透传）；
+> 变异项见 `_research/mutate-profile-dir.cjs`（15 个变异全部被杀）。
 
 ### 仓库现在的取舍
 
