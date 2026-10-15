@@ -71,12 +71,16 @@
         # into the shells and children it spawns, never into its own process.
         # roomsDir: ''
         # The built-in backend is the codex app-server, which needs no entry here.
-        # Every other harness this build knows (DSH, Qoder) is also auto-detected:
-        # if its binary is on PATH, or — for DSH — this very process is a desktop
-        # install with the `acp` profile, then the harness is launched with the
-        # right arguments and needs no entry either. Use `backends` only to
-        # OVERRIDE that, e.g. to point a harness at a wrapper script or to add a
-        # harness this build has never heard of.
+        # Every other harness this build knows (DSH, Qoder) is also auto-detected
+        # and needs no entry either. For DSH that means, in order: this very
+        # process IS a DSH desktop install (proven from its own app.asar, not from
+        # "it is Electron") and has the `acp` profile; otherwise a DSH desktop app
+        # INSTALLED on this machine is found through its uninstall registry entry
+        # (the installer adds no `dsh` command, so PATH cannot see it — this is what
+        # lets this plugin's own standalone desktop build reach a real DSH);
+        # otherwise a `dsh` on PATH. Use `backends` only to OVERRIDE that, e.g. to
+        # point a harness at a wrapper script or to add a harness this build has
+        # never heard of.
         #
         # An entry costs nothing until a member actually names it. Which harnesses
         # the add-member dropdown OFFERS is a separate, user-visible setting:

@@ -14,18 +14,17 @@
 | 项 | 值 |
 | --- | --- |
 | 分支 | `master`，与 `origin/master` 同步 |
-| HEAD | `d6b3220` "Replace the generic acp backend with per-harness agents" |
 | 仓库可见性 | private |
-| 纳入版本控制的文件 | 17 个（`lib/`、`public/`、README、LICENSE、配置） |
-| 离线测试 | 25/25 通过（约 22 秒） |
-| 变异测试 | 20/20 全杀 |
+| 纳入版本控制的文件 | 18 个（`lib/`、`public/`、README、LICENSE、配置） |
+| 离线测试 | 25/25 通过（约 25 秒） |
+| 变异测试 | 30/30 全杀，0 跳过 |
 
 已注册的 harness（也就是「添加成员」下拉框里的选项）：
 
 | backend | protocol | 启动方式 |
 | --- | --- | --- |
 | `codex` | `codex-app-server` | 本机 codex 可执行文件 |
-| `dsh` | `acp` | DSH 自带的 `--profile acp` |
+| `dsh` | `acp` | DSH 自带的 `--profile acp`（自己就在 DSH 里，或本机找到已安装的桌面端） |
 | `qoder` | `acp` | `qoder --acp` |
 
 ---
@@ -275,7 +274,79 @@ profile 目录里发现 `dsh-peer-account-route.yml`，就追加 `--patch <该�
 > 在有这个变量的 shell 里验证等于什么都没验证——这正是当初漏掉它的原因。
 > 回归测试见 `test/harnesses.cjs`（profile 段）、`test/host-entry.cjs`（host 形态 + 旧名册收养）、
 > `test/acp-room.cjs`（端到端 launch line）与 `test/room-registry.cjs`（RoomApi 透传）；
-> 变异项见 `_research/mutate-profile-dir.cjs`（18 个变异全部被杀）。
+> 变异项见 `_research/mutate-profile-dir.cjs`（30 个变异全部被杀，0 跳过）。
+
+### 「本机有没有 DSH」不能靠猜（这里出过第二次事故）
+
+`detectDsh()` 现在有**四个分支**，缺任何一个都会以「静默失败」的方式暴露：
+
+| # | 条件 | 说明 |
+| --- | --- | --- |
+| 1 | **自己就在 DSH 里** | `isDshDesktopHost()`：Electron **且** 自己的 `app.asar` 里真有 DSH host |
+| 2 | **本机装着 DSH 桌面端** | `discoverDshInstall()`：注册表 → PATH 同级目录 → 常见安装路径 |
+| 3 | **PATH 上有 `dsh`** | 只对 CLI 安装有效 |
+| 4 | 都没有 | 明确说「未检测到」，而不是含糊的 false |
+
+**分支 1 曾经写成「是 Electron 且有 `resourcesPath` 就算 DSH」。** 这个条件在
+**本插件自己的独立桌面版**（`Agent Room.exe`，同样是 Electron）里也成立，于是：
+
+- 它宣称「当前进程即 DSH」；
+- `launchDsh` 拿**自己的** `process.execPath` 和**自己的** `resources/app.asar` 拼 launch line；
+- 那个 asar 里没有 `dsh/.../cli.js`，**参数指向一个不存在的文件**；
+- 成员起不来，而错误信息完全指不到原因。
+
+**判据必须是 asar 的内容，不是「这是个 Electron」。** `asarHasDshHost(asarPath)`
+走 `dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js` 这条路径，并且**按
+asar 在当前进程里的形态选探针**：
+
+- **文件**（普通 `node`：测试套件、你自己跑的脚本）→ 读 Electron 头部：前 16 字节是
+  preamble，其中 **offset 12 的 u32 = 紧随其后的 JSON 目录长度**，读出目录并逐层走
+  `files`。此时 `existsSync('<asar>/dsh/...')` **必然为假**——对操作系统来说 asar 就是个文件。
+- **已挂载的目录**（Electron 里）→ `statSync` 报 `isDirectory: true, size: 0`，内层路径
+  `existsSync` 为真，而**读它自己的字节会 ENOENT**。
+
+两种形态**互补**，所以由 `statSync` 的结果决定用哪个探针，而**不是**看
+`process.versions.electron`：前者描述「这个 asar 现在是什么」，后者只描述运行时，
+测试里 stub 运行时时会选错探针。
+
+> **实测（真实独立应用 `D:\agents-group\dsh-agent-room\dist\win-unpacked\Agent Room.exe`，
+> `ELECTRON_RUN_AS_NODE=1`，加载的正是本仓库的 `lib/harnesses.cjs`）：**
+>
+> | 代码 | `own asar is DSH` | dsh 行 | 是否自我指向 |
+> | --- | --- | --- | --- |
+> | 修复前（HEAD `7db8d57`） | false | `found:true`「当前进程即 DSH」 | **是** ← 事故 |
+> | 独立应用自己那份 `lib/` | false | `found:false`（看不见真装的 DSH） | 否 ← 反向事故 |
+> | 本仓库修复后 | false | `found:true` → `D:\DeepSeek Harness` | 否 |
+>
+> 复现脚本：`_research/standalone-probe.cjs`（用 `AR_HARNESSES` 指向不同版本，可三方对比）。
+> 这个对比也说明**「收紧」和「发现」必须一起做**：只收紧会从「误报」变成「漏报」。
+
+#### 分支 2：怎么找到一个「不是自己」的 DSH
+
+关键是**注册表**，因为安装器**不写 `dsh` 命令**，所以 PATH 永远看不见桌面端：
+
+```
+HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\<guid>
+    DisplayName      REG_SZ    DeepSeek Harness 0.2.0-rc.2
+    InstallLocation  REG_SZ    D:\DeepSeek Harness
+    DisplayIcon      REG_SZ    D:\DeepSeek Harness\DeepSeek Harness.exe,0
+```
+
+- 用 **`reg query <hive> /s /f "DeepSeek Harness" /d`**（带 `/f` 过滤：**20ms / 526 字符**，
+  不加过滤是 **87ms / 16604 字符**）。三个 hive：HKCU、HKLM、HKLM WOW6432Node。
+- **`/f` 匹配的是「值」，不是「键名」**，所以 `DisplayName` 必须**在块内**再校验一次，
+  否则一个「注释里提到 DeepSeek Harness」的无关程序会被当成安装目录去探测。
+- `InstallLocation` 优先，没有就用 `DisplayIcon` 的 `dirname`。
+- **`DisplayIcon` 的 `,0` 资源索引在引号外面**，所以必须先去掉索引再去引号；
+  顺序反了会得到 `"E:\Apps\DSH`（前引号还在、路径被截断）。
+- `discoverDshInstall()` **故意不做模块级缓存**：设置行有个「重新检测」按钮，它的全部意义
+  就是让用户装完 DSH 后能立刻看到——在这里 memo 化会让那个按钮变成谎话。
+  昂贵的那步（注册表查询）在调用点已经有 5 秒缓存，那是唯一知道 UI 能容忍多旧答案的层。
+
+`discoverDshInstall(candidates)` 和 `detectDsh(candidates)` 都接受一个**显式候选列表**，
+只为测试存在：否则「找到一个安装 → 检测行这么报 → 启动行这么拼」这条链路就只能依赖
+**跑测试那台机器上恰好装了什么**，而它恰恰是最容易静默断掉的一段（变异测试证明：
+删掉分支 2 的**接线**时，只断言 `discoverDshInstall` 的测试**全绿**）。
 
 ### 旧名册目录会被收养（别把这行删了）
 
@@ -331,5 +402,6 @@ profile 目录里发现 `dsh-peer-account-route.yml`，就追加 `--patch <该�
 
 1. **重启 DSH**，确认「设置 → 通用 → Agent 群聊可用后端」这一行出现且可交互。
 2. 在真实 GUI 里加一个 `qoder` 成员（若本机装了 Qoder）或 `dsh` 成员，验证成员真的能起会话。
-   注意 `dsh`/`qoder` 在本机 PATH 上都不存在，`dsh` 只在 DSH 桌面端进程内算「已探测到」。
+   注意本机 PATH 上**没有** `dsh`：它现在靠**分支 2**（注册表发现 `D:\DeepSeek Harness`）成立，
+   而不是靠「自己就是 DSH」——后者在插件宿主里本来也不成立。
 3. 若要继续补 harness，见 §6.2——加描述即可，然后补测试与变异项。
