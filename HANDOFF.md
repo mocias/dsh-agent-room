@@ -273,9 +273,28 @@ profile 目录里发现 `dsh-peer-account-route.yml`，就追加 `--patch <该�
 
 > **验证这条链路时，必须把 `DSH_PROFILE_DIR` 显式 unset，或在真实 Electron host 里跑。**
 > 在有这个变量的 shell 里验证等于什么都没验证——这正是当初漏掉它的原因。
-> 回归测试见 `test/harnesses.cjs`（profile 段）、`test/host-entry.cjs`（host 形态）、
+> 回归测试见 `test/harnesses.cjs`（profile 段）、`test/host-entry.cjs`（host 形态 + 旧名册收养）、
 > `test/acp-room.cjs`（端到端 launch line）与 `test/room-registry.cjs`（RoomApi 透传）；
-> 变异项见 `_research/mutate-profile-dir.cjs`（15 个变异全部被杀）。
+> 变异项见 `_research/mutate-profile-dir.cjs`（18 个变异全部被杀）。
+
+### 旧名册目录会被收养（别把这行删了）
+
+上面那个 bug 还有个**遗留后果**：旧版看不到 profile 目录，于是名册落到
+`<cwd>/.agent-room-rooms`；而桌面端 host 的 cwd **就是** profile 目录，
+所以那次事故留下的真实名册在 `<profile>/.agent-room-rooms`（**带点**）。
+
+修好之后正典位置是 `<profile>/agent-room-rooms`（**不带点**）——**另一个目录**。
+若无条件切过去，用户会看到房间成员和聊天记录全部「消失」，观感和插件坏掉一样。
+
+因此 `defaultRoomsDir` 会做一次**只读收养**：
+
+- 正典目录已存在 → 用正典（已迁移的用户不会被拽回旧目录）；
+- 否则旧目录存在**且确实是目录** → **就地使用**旧目录（不复制、不删除，不产生重复名册）；
+- 旧路径只是个文件 → 不收养（否则名册根是个文件，写入即失败）。
+
+`filesDir` / `themeDir` 是从 `dirname(roomsDir)` 推出来的，两条路都落在 profile 下，
+所以上传与主题**不受影响、不会搬家**。收养逻辑的变异项同上（`never adopt` /
+`legacy wins over canonical` / `adopt a file` 三个都被杀）。
 
 ### 仓库现在的取舍
 
