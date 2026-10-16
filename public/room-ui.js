@@ -556,6 +556,9 @@
       live = new Map();
       snapshot = { members: [], log: [], mode: 'chat', connected: false };
       inputEl.value = '';
+      // A room switch clears the composer, so it also has to clear the button's
+      // state: leaving it armed would offer to send the previous room's text.
+      syncSend();
       setError('');
       renderMembers();
       renderLog();
@@ -742,6 +745,10 @@
         if (created.id) {
           inputEl.value = (inputEl.value + ' @' + created.id).trim() + ' ';
           inputEl.focus();
+          // Same reason as the member chip: assigning `.value` fires no `input`
+          // event, so the newly added member's mention would land in a composer
+          // whose send button never learned there was something to send.
+          syncSend();
         }
       } catch (error) {
         setError(error.message);

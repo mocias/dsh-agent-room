@@ -17,7 +17,7 @@
 | 仓库可见性 | private |
 | 纳入版本控制的文件 | 18 个（`lib/`、`public/`、README、LICENSE、配置） |
 | 离线测试 | 25/25 通过（约 25 秒） |
-| 变异测试 | 43/43 全杀，0 跳过 |
+| 变异测试 | 45/45 全杀，0 跳过 |
 
 已注册的 harness（也就是「添加成员」下拉框里的选项）：
 
@@ -210,9 +210,22 @@ send() -> await post('/say') -> server.cjs:768 -> room.say()
 
 **顺带修掉一个一直存在的死代码**：发送按钮的启用状态原本写在 `renderTray()` 的**末尾**，
 而它前面有 `if (empty) return`——于是"托盘为空"（最常见的情况）时那行永远不执行，
-按钮一直是可点的死控件。现在抽成 `syncSend()`，在 `if (empty)` **之前**调用，并且
-`inputEl.oninput`、成员 chip 的 `@` 插入、以及 mount 初始化都显式调它（**赋值
-`.value` 不会触发 `input` 事件**，这三处都得手动同步）。
+按钮一直是可点的死控件。现在抽成 `syncSend()`，在 `if (empty)` **之前**调用。
+
+**所有赋值 `.value` 的地方都必须手动 `syncSend()`**，因为赋值不触发 `input` 事件。
+一共 5 处，全部已接线（少任何一处，按钮就会停在错误的状态上）：
+
+| 位置 | 场景 |
+| --- | --- |
+| `inputEl.oninput` | 用户打字 —— 发送后"重新武装"按钮的唯一途径 |
+| 成员 chip 的 `onclick` | 点 chip 插入 `@id` |
+| 添加成员成功后 | 新成员自动插入 `@id`（L743，容易漏） |
+| `switchRoom` | 切房间清空输入框（L558，容易漏） |
+| `mount` 初始化 | 标记里按钮默认是可点的，而空输入框没什么可发 |
+
+> 后两处是**变异测试逼出来的**：第一次只上前三处，两个变异体活了下来——chip 点击留下的
+> `@codex` 让按钮一直是"已武装"，把"添加成员"那条断言的因果遮住了。断言之前必须先把
+> 状态**清干净**（`el('input').value = ''` + `oninput()`），否则它测的是上一步的残留。
 
 > **为什么原来的测试全绿却漏掉了它**：`test/ui-attachments.cjs` 的 `/say` stub 是**同步
 > resolve** 的，`await` 一次都不让出，清空看起来是瞬时的。回归测试必须用一个**测试自
@@ -321,7 +334,7 @@ profile 目录里发现 `dsh-peer-account-route.yml`，就追加 `--patch <该�
 > 在有这个变量的 shell 里验证等于什么都没验证——这正是当初漏掉它的原因。
 > 回归测试见 `test/harnesses.cjs`（profile 段）、`test/host-entry.cjs`（host 形态 + 旧名册收养）、
 > `test/acp-room.cjs`（端到端 launch line）与 `test/room-registry.cjs`（RoomApi 透传）；
-> 变异项见 `_research/mutate-profile-dir.cjs`（43 个变异全部被杀，0 跳过）。
+> 变异项见 `_research/mutate-profile-dir.cjs`（45 个变异全部被杀，0 跳过）。
 
 ### 「本机有没有 DSH」不能靠猜（这里出过第二次事故）
 
