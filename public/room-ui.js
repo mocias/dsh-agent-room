@@ -456,6 +456,9 @@
         chip.onclick = () => {
           inputEl.value = (inputEl.value + ' @' + member.id).trim() + ' ';
           inputEl.focus();
+          // Assigning `.value` fires no `input` event, so the button would stay
+          // disabled after a mention is inserted into an emptied composer.
+          syncSend();
         };
         host.appendChild(chip);
       }
@@ -1079,11 +1082,27 @@
       renderTray();
     }
 
+    /**
+     * The send button's enabled state, in one place.
+     *
+     * A message may be only attachments, so this follows the same rule `say()`
+     * does — otherwise the UI would refuse a send the server would have
+     * accepted. It is its own function because it must run even when the tray
+     * is EMPTY: it used to sit at the end of `renderTray`, after a
+     * `if (empty) return`, which made it dead code in the commonest case and
+     * left the button enabled over an empty box. Anything that can change the
+     * text or the staged files has to call this.
+     */
+    function syncSend() {
+      el('send').disabled = sending || (!inputEl.value.trim() && !pending.length);
+    }
+
     function renderTray() {
       const tray = el('tray');
       tray.innerHTML = '';
       const empty = !pending.length && !uploading;
       tray.hidden = empty;
+      syncSend();
       if (empty) return;
       for (const attachment of pending) {
         const chip = doc.createElement('span');
@@ -1131,10 +1150,6 @@
         chip.appendChild(body);
         tray.appendChild(chip);
       }
-      // A message may be only attachments, so the button's enabled state must
-      // follow the same rule `say()` does — otherwise the UI would refuse a send
-      // the server would have accepted.
-      el('send').disabled = sending || (!inputEl.value.trim() && !pending.length);
     }
 
     function formatBytes(bytes) {
@@ -1168,29 +1183,83 @@
       button.title = `添加图片或文件（也可以直接拖进来，或粘贴剪贴板里的图片）${limit}`;
     }
 
+    /**
+     * Put text in the composer and resize it to fit.
+     *
+     * The height is set from `scrollHeight` rather than left to `oninput`,
+     * because assigning `.value` fires no `input` event: restoring a failed
+     * send's text would otherwise leave a one-line box holding five lines.
+     * `scrollHeight` is 0 in the DOM shim the tests use, so the clamp keeps a
+     * benign `0px` rather than a negative or `NaN` height.
+     */
+    function setComposerText(text) {
+      inputEl.value = text;
+      inputEl.style.height = 'auto';
+      const measured = Number(inputEl.scrollHeight) || 0;
+      inputEl.style.height = Math.min(measured, 160) + 'px';
+    }
+
+    /**
+     * Empty the composer.
+     *
+     * Called the moment a send is accepted, not when its response lands.
+     * `POST /say` does not answer when the message is recorded: for a room's
+     * first message or any `@`, `say()` awaits the woken members' whole turn
+     * before returning. Clearing after that await tied the box to the slowest
+     * thing in the room, so the text sat there for the length of a turn —
+     * measured at 32s on this machine — and looked like it vanished only
+     * because an agent finally spoke.
+     */
+    function clearComposer() {
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+    }
+
+    /**
+     * Drop the staged attachments and release their thumbnails.
+     *
+     * Only on a confirmed send: a request that failed must leave the files
+     * staged, and the object URLs are what paint their thumbnails, so revoking
+     * them early would blank the chips the user still needs to retry with.
+     */
+    function releasePending() {
+      for (const entry of pending) if (entry.localUrl) URL.revokeObjectURL(entry.localUrl);
+      pending = [];
+    }
+
     async function send() {
-      const text = inputEl.value.trim();
+      // The UNTRIMMED text is kept for the failure path: giving back a trimmed
+      // version of what the user typed is a small, gratuitous edit to their words.
+      const raw = inputEl.value;
+      const text = raw.trim();
       const attachments = pending.map((entry) => entry.id);
       // Same guard as the server: text or a file, either one is enough.
       if ((!text && !attachments.length) || sending || uploading) return;
       sending = true;
-      el('send').disabled = true;
       setError('');
+      // Clearing first is the whole point: this runs while the request is still
+      // in flight, so the box is empty for the length of the turn rather than
+      // for its duration plus the response.
+      clearComposer();
+      renderTray();
       try {
         await post('/say', { text, attachments });
-        inputEl.value = '';
-        inputEl.style.height = 'auto';
-        for (const entry of pending) if (entry.localUrl) URL.revokeObjectURL(entry.localUrl);
-        pending = [];
+        releasePending();
         renderTray();
       } catch (error) {
+        // The text goes back, but only into a box the user has not already
+        // started refilling: clobbering a newer draft to restore an older one
+        // would be the same bug in the other direction.
+        if (!inputEl.value) setComposerText(raw);
         // The attachments stay staged: a send that failed for an unrelated
         // reason (the room is gone, the host restarted) should not also cost the
         // user the files they picked.
         setError(error.message);
       } finally {
         sending = false;
-        el('send').disabled = false;
+        // `renderTray` runs `syncSend`, which owns the button's state including
+        // the `sending` flag. Setting it here as well is how the button ended up
+        // with two owners and one of them unreachable.
         renderTray();
         inputEl.focus();
       }
@@ -1504,6 +1573,10 @@
     inputEl.oninput = () => {
       inputEl.style.height = 'auto';
       inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+      // Typing is what re-arms the button after a send empties the box, so this
+      // is not cosmetic: without it the button would stay disabled until some
+      // other event happened to re-render the tray.
+      syncSend();
     };
 
     /**
@@ -1520,6 +1593,11 @@
     empty.textContent = '正在连接房间…';
     logEl.appendChild(empty);
     placeholder = empty;
+
+    // The markup ships the button enabled, and an empty composer has nothing to
+    // send, so the first honest state has to be set here. Nothing else runs
+    // early enough: `renderTray` returns before its sync when the tray is empty.
+    syncSend();
 
     connect();
     loadCatalog();

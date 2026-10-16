@@ -17,7 +17,7 @@
 | 仓库可见性 | private |
 | 纳入版本控制的文件 | 18 个（`lib/`、`public/`、README、LICENSE、配置） |
 | 离线测试 | 25/25 通过（约 25 秒） |
-| 变异测试 | 30/30 全杀，0 跳过 |
+| 变异测试 | 43/43 全杀，0 跳过 |
 
 已注册的 harness（也就是「添加成员」下拉框里的选项）：
 
@@ -177,6 +177,53 @@ profile 层的现状（**不在仓库里**，属于机主个人配置）：
 - `git push` 曾因代理失败（WinINET 代理 `gh` 认、`git` 不认）。若复现：
   `git config --local http.proxy <proxy>`。
 
+### 5.5 输入框的文本要立刻消失，不能等 agent 回话
+
+**症状**：打完字点发送，文本在输入框里挂着不走，等某个 agent 发言之后才消失。
+
+**根因**是 `POST /say` 的**响应时机**，不是渲染问题：
+
+```
+send() -> await post('/say') -> server.cjs:768 -> room.say()
+       -> L1622 await this._serveNow(mentions)   <-- 这里
+       -> _preempt -> _deliver -> _runSegment    <-- 整整一个模型回合
+```
+
+`say()` 在**消息落库之后**并不返回，而是等被唤醒的成员把这一回合跑完。所以「等
+`await post()` 再清空输入框」= 把输入框绑在房间里最慢的那件事上。本机实测 32 秒
+（`room-mv91bu9a-1idg.log.jsonl`：`16:11:05.418` 发出 → `16:11:37.793` 第一个 agent 回复）。
+
+有一个**不对称**容易把人带偏：不带 `@` 的消息（且不是房间第一条）走
+`delivered = []` 立即返回，agent 下一个 tick 才被服务——所以随手发一句反而"正常"；
+一带 `@`，`_serveNow` 就会阻塞，文本就挂住。
+
+**修法**：客户端**乐观清空**——`clearComposer()` 放在 `await` 之前，失败时用
+`setComposerText(raw)` 还回去。`delivered` 这个字段 UI 根本没消费（消息靠 SSE 回来），
+所以不需要动服务端契约（`say()` 返回 `delivered` 被 `prewarm` / `backend-death` /
+`thread-reuse` / `member-api` 断言，动它会连累一片）。
+
+三个**容易漏掉的边界**，都补了断言与变异项：
+
+1. 还回去的必须是**原文**，不是 `trim()` 过的（发送用 trimmed，原文只有这里还留着）。
+2. 失败时**不能覆盖**用户在等待期间新打的草稿——否则就是同一个 bug 的反面。
+3. 失败时附件**保持暂存**（原有的合同，别打破）。
+
+**顺带修掉一个一直存在的死代码**：发送按钮的启用状态原本写在 `renderTray()` 的**末尾**，
+而它前面有 `if (empty) return`——于是"托盘为空"（最常见的情况）时那行永远不执行，
+按钮一直是可点的死控件。现在抽成 `syncSend()`，在 `if (empty)` **之前**调用，并且
+`inputEl.oninput`、成员 chip 的 `@` 插入、以及 mount 初始化都显式调它（**赋值
+`.value` 不会触发 `input` 事件**，这三处都得手动同步）。
+
+> **为什么原来的测试全绿却漏掉了它**：`test/ui-attachments.cjs` 的 `/say` stub 是**同步
+> resolve** 的，`await` 一次都不让出，清空看起来是瞬时的。回归测试必须用一个**测试自
+> 己控制的 deferred**（`gateSend()`）把请求挂住，然后在"回合仍在进行"的时刻断言输入框
+> 已经空了。任何"改了时序才暴露"的 bug，都要先问一句：我的 stub 会不会把它抹平？
+
+**前端文件是在启动时一次读进内存的，改完必须重启 DSH**：`lib/index.js` 的 `STATIC` 在
+`apply()` 里就把 `public/room-ui.js` `readFileSync` 进 `staticFiles`（L234），
+`/app.js` 只是把内存里那份 `sendText` 出去（`server.cjs:716-721`），**没有 Cache-Control**。
+所以刷页面没用，要重启宿主。
+
 ---
 
 ## 6. 未完成 / 可继续的
@@ -274,7 +321,7 @@ profile 目录里发现 `dsh-peer-account-route.yml`，就追加 `--patch <该�
 > 在有这个变量的 shell 里验证等于什么都没验证——这正是当初漏掉它的原因。
 > 回归测试见 `test/harnesses.cjs`（profile 段）、`test/host-entry.cjs`（host 形态 + 旧名册收养）、
 > `test/acp-room.cjs`（端到端 launch line）与 `test/room-registry.cjs`（RoomApi 透传）；
-> 变异项见 `_research/mutate-profile-dir.cjs`（30 个变异全部被杀，0 跳过）。
+> 变异项见 `_research/mutate-profile-dir.cjs`（43 个变异全部被杀，0 跳过）。
 
 ### 「本机有没有 DSH」不能靠猜（这里出过第二次事故）
 
