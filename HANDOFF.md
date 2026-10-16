@@ -16,8 +16,8 @@
 | 分支 | `master`，与 `origin/master` 同步 |
 | 仓库可见性 | private |
 | 纳入版本控制的文件 | 18 个（`lib/`、`public/`、README、LICENSE、配置） |
-| 离线测试 | 25/25 通过（约 25 秒） |
-| 变异测试 | 45/45 全杀，0 跳过 |
+| 离线测试 | 25/25 通过（约 29 秒） |
+| 变异测试 | 56/56 全杀，0 跳过 |
 
 已注册的 harness（也就是「添加成员」下拉框里的选项）：
 
@@ -25,7 +25,39 @@
 | --- | --- | --- |
 | `codex` | `codex-app-server` | 本机 codex 可执行文件 |
 | `dsh` | `acp` | DSH 自带的 `--profile acp`（自己就在 DSH 里，或本机找到已安装的桌面端） |
-| `qoder` | `acp` | `qoder --acp` |
+| `qoder` | `acp` | Qoder 桌面版自带的 ACP worker（npm 装的 `qoder` CLI 也认） |
+
+### 自动检测必须先问用户
+
+检测会读 PATH、查注册表、扫安装目录——这是**替用户扫描他自己的机器**，所以插件默认不扫：
+
+| `discovery-consent.json` 里的 `choice` | 含义 | 行为 |
+| --- | --- | --- |
+| 文件不存在 / `null` | 从没问过 | **不扫**，设置行弹出对话框询问 |
+| `"automatic"` | 问过，同意 | 照常检测 |
+| `"manual"` | 问过，不同意 | **不扫**，只能手动勾选或手写启动命令 |
+
+「从没问过」必须是一个独立状态，不能塌缩成另两个之一：默认成 `automatic` 就是偷扫一台
+没被问过的机器；默认成 `manual` 又会让新装用户找不到自己明明装了的东西，还看不出有个
+问题在等他回答。
+
+**闸门在服务端**（`RoomApi._allowAuto()`），不是只在前端：`GET /harnesses?refresh=1`
+是唯一一个「插件主动要求扫描」的入口，也是这个闸门真正起作用的地方；手搓一个请求也绕不过去。
+检测缓存**按同意状态做 key**（`_detectionsCache.allowAuto`），所以用户撤回同意后，下一次
+普通读取不会继续端出刚才那次扫描的结果——`/state` 是真正走缓存的路径，测试盯的就是它。
+
+**插件加载时也不许扫。** `apply()` 结尾那条 ready 日志曾经无条件调用 `detectHarnesses()`
+把结果打进日志——那是一次**用户看不见、也没同意过的扫描**。现在它只打印
+`consent=unasked`／`automatic`／`manual`，**只有用户已经同意过**才附上 `harnesses=` 摘要
+（否则「诊断信息」就成了绕过闸门的后门）。日志是自启扫描最后能藏身的地方。
+
+`detectHarnesses({ allowAuto: false })` 返回的行带 `blocked: true`，文案是「没看过」而不是
+「没检测到」。这两件事必须能区分：说「未检测到」是在告诉用户他的机器上没有某个我们压根
+没去找的东西。顺带 `forced`（强制启用）也不会在这种行上点亮。
+
+弹窗用宿主的 `Modal` + `Button`（`@deepseek-ai/dsh-client-ui-primitives`，平台种子模块，
+从任何 bundle 工厂里 `require` 都能解析，portal 到 `document.body`，所以不需要额外占用
+slot）；`inject` 保持 `['slots','sidebarRightTabs']` 不变。
 
 ---
 
@@ -334,7 +366,12 @@ profile 目录里发现 `dsh-peer-account-route.yml`，就追加 `--patch <该�
 > 在有这个变量的 shell 里验证等于什么都没验证——这正是当初漏掉它的原因。
 > 回归测试见 `test/harnesses.cjs`（profile 段）、`test/host-entry.cjs`（host 形态 + 旧名册收养）、
 > `test/acp-room.cjs`（端到端 launch line）与 `test/room-registry.cjs`（RoomApi 透传）；
-> 变异项见 `_research/mutate-profile-dir.cjs`（45 个变异全部被杀，0 跳过）。
+> 变异项见 `_research/mutate-profile-dir.cjs`（56 个变异全部被杀，0 跳过）。
+> 其中 11 个专门盯本轮新增的同意闸门：库层的 `allowsAutoDetection`、服务端的
+> `_allowAuto()` 接线、**缓存 key**（撤回同意后不得继续端出旧扫描结果）、前端
+> 「先弹窗再扫描」、以及**加载时不得扫描**（那条 ready 日志曾经无条件调用
+> `detectHarnesses()`）。这些变异体是逼着测试补出来的：一开始只测 `POST /consent`
+> 自己的返回，结果「缓存没按同意状态做 key」和「没扫过的行被标成强制启用」两个变异体活着。
 
 ### 「本机有没有 DSH」不能靠猜（这里出过第二次事故）
 
@@ -430,6 +467,68 @@ dsh  found:false  "未检测到 dsh（本机 PATH 上没有 dsh，且当前进�
 > 本会话的对照实验（`_research/standalone-probe.cjs`，可用 `AR_HARNESSES` 指向任意版本）
 > 证明：**只加载本仓库那份会让「已修好」看起来成立**，而打包产物仍是旧的。
 
+### Qoder 桌面版：没有 CLI，但有 ACP worker
+
+Qoder 桌面版**不是**一个 CLI。它自带一个能说 ACP 的 worker 线程，而 launcher 布局是：
+
+```
+D:\qoder\Qoder CN\
+├── Qoder CN.exe                        ← 安装根的旧全量副本（141 MB asar）
+├── resources\app.asar                  ← 同一份旧代码
+└── .qoder-versions\
+    ├── 0.4.7\  (Qoder CN.exe + resources\app.asar, 157 MB)
+    └── 0.4.8\  (Qoder CN.exe + resources\app.asar, 157 MB)  ← 真正在跑的
+```
+
+三样东西**同时存在**才算一个可用的 Qoder（`qoderDesktopLaunch`）：
+
+1. exe 是真文件；
+2. `<resources>/app.asar` 里**真有** `<sdk>/dist/index.js`（用 `asarHasEntry`）；
+3. `<resources>/app.asar.unpacked/node_modules/@qoder-ai/<sdk>/dist/_worker/qoder-worker-runtime.obf.mjs` 是真文件。
+
+`sdk` 依次试 **`qoder-cn-agent-sdk`（CN）→ `qoder-agent-sdk`（国际版）**。缺任何一样都
+说明是一次没打完的更新，**拒绝**它比启动一个半成品好——错误会离原因很远。
+
+启动链路是**两层**的，别把参数放错层：
+
+```
+Qoder CN.exe  (ELECTRON_RUN_AS_NODE=1)
+  └─ lib/qoder-worker.cjs <worker-runtime.mjs>       ← 本插件的中转
+       └─ new Worker(runtime, { argv: ['--acp'] })   ← ACP flag 在这一层
+```
+
+`--acp` 由 **shim 拼进 worker 的 argv**，所以 launch line 自己**不能再传一遍**（会重复）。
+
+#### 候选排序：launcher 的 `state.ini` 优先于一切
+
+**这是本仓库唯一出过「选错可执行文件」的地方。** 同一个产品同时躺在好几个位置，而它们
+的 `path.basename` **完全一样**（都是 `Qoder CN.exe`），所以**不能靠文件名排序**：
+
+| rank | 来源 | 为什么 |
+| --- | --- | --- |
+| `0` | `state.ini` 的 `appExecutable` | launcher 自己正在用的就是它 |
+| `10+index` | `<installDir>\.qoder-versions\<ver>\` | 版本目录，**按数字降序**（`0.4.10` > `0.4.8`，字符串排序会反过来） |
+| `20` | 安装根的全量副本 | 更新没清干净的残留 |
+| `100` | 注册表恢复出的根 | 版本未知，靠它里面的版本目录决定 |
+| `300` | `%LOCALAPPDATA%` / `%ProgramFiles%` 的常见路径 | 兜底 |
+
+launcher 的状态在 `%LOCALAPPDATA%\<product>\<product> Launcher\state.ini`：
+
+```ini
+[launcher]
+installDir=D:\qoder\Qoder CN
+appExecutable=.qoder-versions\0.4.8\Qoder CN.exe   ← 相对 installDir，必须 join
+```
+
+注册表这条**和 DSH 不一样**，不能照抄：Qoder **没有 `InstallLocation`**，`DisplayIcon` 指向
+的是 `uninstallerIcon.ico`（**不是 exe**），所以只能 `dirname` 它——DSH 那条读 `iconExe`
+的路径在这里必然失败。
+
+> 曾经的 bug：靠 `path.basename` + 运行中进程做 tiebreak，结果**两边的 basename 相同**，
+> 于是选中了安装根那份旧代码。改用上面的显式数值 rank 才修好。真实机器实测：
+> `detectQoder()` 现在选 `D:\qoder\Qoder CN\.qoder-versions\0.4.8\Qoder CN.exe`。
+> 复现脚本 `_research/check-qoder.cjs`。
+
 ### 旧名册目录会被收养（别把这行删了）
 
 上面那个 bug 还有个**遗留后果**：旧版看不到 profile 目录，于是名册落到
@@ -486,6 +585,8 @@ dsh  found:false  "未检测到 dsh（本机 PATH 上没有 dsh，且当前进�
 `agent-room/` 以 junction 链进 `desktop` profile，所以重启后 `lib/*` 的改动就是生效的。
 
 1. **重启 DSH**，确认「设置 → 通用 → Agent 群聊可用后端」这一行出现且可交互。
+   **首次打开会弹出「允许自动检测本机后端吗？」的对话框**——这是本轮新增的行为，回答
+   「允许检测」后才会真的扫描。若对话框没出现而直接显示「未检测」，说明前端还是旧包。
 2. 在真实 GUI 里加一个 `qoder` 成员（若本机装了 Qoder）或 `dsh` 成员，验证成员真的能起会话。
    注意本机 PATH 上**没有** `dsh`：它现在靠**分支 2**（注册表发现 `D:\DeepSeek Harness`）成立。
    重启前 host 里报的是旧分支 1（「当前进程即 DSH」）——在这台机器上结论**恰好也对**，
